@@ -1,0 +1,344 @@
+// ProcurePilot — Complete Database Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  OWNER
+  MANAGER
+  STAFF
+}
+
+enum OrderStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  PROCESSING
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  CREATED
+  APPROVED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+enum ApprovalAction {
+  APPROVED
+  REJECTED
+}
+
+enum AgentRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+// ============================================================
+// BUSINESS & USERS
+// ============================================================
+
+/// A wholesale business — the top-level tenant.
+model Business {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  phone     String?
+  address   String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  users          User[]
+  products       Product[]
+  inventoryItems Inventory[]
+  sales          Sale[]
+  suppliers      Supplier[]
+  agentRuns      AgentRun[]
+  purchaseOrders PurchaseOrder[]
+
+  @@map("businesses")
+}
+
+/// A user who belongs to a business.
+model User {
+  id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  firstName    String   @map("first_name")
+  lastName     String   @map("last_name")
+  role         UserRole @default(STAFF)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  approvalLogs ApprovalLog[]
+
+  @@index([businessId])
+  @@map("users")
+}
+
+// ============================================================
+// PRODUCTS & INVENTORY
+// ============================================================
+
+/// A product that the business sells.
+model Product {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  name        String
+  sku         String
+  category    String?
+  unit        String   @default("unit") // e.g. "kg", "case", "unit"
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  business         Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  inventoryItems   Inventory[]
+  sales            Sale[]
+  supplierProducts SupplierProduct[]
+  purchaseItems    PurchaseItem[]
+
+  @@unique([businessId, sku])
+  @@index([businessId])
+  @@map("products")
+}
+
+/// Current inventory level for a product.
+model Inventory {
+  id              String   @id @default(uuid())
+  businessId      String   @map("business_id")
+  productId       String   @map("product_id")
+  currentStock    Int      @map("current_stock")
+  reorderLevel    Int      @map("reorder_level")    // Alert when stock falls below this
+  reorderQuantity Int      @map("reorder_quantity")  // Default quantity to reorder
+  lastRestocked   DateTime? @map("last_restocked")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, productId])
+  @@index([businessId])
+  @@map("inventory")
+}
+
+/// A historical sale record used for demand forecasting.
+model Sale {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  productId  String   @map("product_id")
+  quantity   Int
+  unitPrice  Decimal  @map("unit_price") @db.Decimal(12, 2)
+  total      Decimal  @db.Decimal(12, 2)
+  soldAt     DateTime @map("sold_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  // Relations
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+  @@index([productId])
+  @@index([soldAt])
+  @@map("sales")
+}
+
+// ============================================================
+// SUPPLIERS
+// ============================================================
+
+/// A supplier that can provide products.
+model Supplier {
+  id              String   @id @default(uuid())
+  businessId      String   @map("business_id")
+  name            String
+  contactEmail    String?  @map("contact_email")
+  contactPhone    String?  @map("contact_phone")
+  address         String?
+  reliabilityScore Decimal @default(0.8) @map("reliability_score") @db.Decimal(3, 2) // 0.00 to 1.00
+  qualityScore    Decimal  @default(0.8) @map("quality_score") @db.Decimal(3, 2)     // 0.00 to 1.00
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  business         Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  supplierProducts SupplierProduct[]
+  supplierQuotes   SupplierQuote[]
+
+  @@index([businessId])
+  @@map("suppliers")
+}
+
+/// A product that a supplier can provide, with their pricing.
+model SupplierProduct {
+  id             String   @id @default(uuid())
+  supplierId     String   @map("supplier_id")
+  productId      String   @map("product_id")
+  unitPrice      Decimal  @map("unit_price") @db.Decimal(12, 2)
+  minOrderQty    Int      @default(1) @map("min_order_qty")
+  deliveryDays   Int      @map("delivery_days")
+  isAvailable    Boolean  @default(true) @map("is_available")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([supplierId, productId])
+  @@index([productId])
+  @@map("supplier_products")
+}
+
+/// A quotation submitted by a supplier for a specific product.
+model SupplierQuote {
+  id          String   @id @default(uuid())
+  supplierId  String   @map("supplier_id")
+  productId   String   @map("product_id")
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(12, 2)
+  quantity    Int
+  totalPrice  Decimal  @map("total_price") @db.Decimal(12, 2)
+  validUntil  DateTime @map("valid_until")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Relations
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([supplierId])
+  @@index([productId])
+  @@map("supplier_quotes")
+}
+
+// ============================================================
+// AI AGENT RUNS
+// ============================================================
+
+/// A record of an AI agent orchestration run.
+model AgentRun {
+  id             String         @id @default(uuid())
+  businessId     String         @map("business_id")
+  objective      String                                // The user's procurement request
+  budget         Decimal?       @db.Decimal(12, 2)
+  forecastDays   Int?           @map("forecast_days")
+  status         AgentRunStatus @default(RUNNING)
+  result         Json?                                 // Final structured result from the agent
+  events         Json[]         @default([])           // Ordered log of agent actions/decisions
+  errorMessage   String?        @map("error_message")
+  startedAt      DateTime       @default(now()) @map("started_at")
+  completedAt    DateTime?      @map("completed_at")
+
+  // Relations
+  business       Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  purchaseOrder  PurchaseOrder?
+
+  @@index([businessId])
+  @@map("agent_runs")
+}
+
+// ============================================================
+// PURCHASE ORDERS & PAYMENTS
+// ============================================================
+
+/// A purchase order generated by the procurement agent.
+model PurchaseOrder {
+  id           String      @id @default(uuid())
+  businessId   String      @map("business_id")
+  agentRunId   String      @unique @map("agent_run_id")
+  orderNumber  String      @unique @map("order_number")
+  status       OrderStatus @default(DRAFT)
+  subtotal     Decimal     @db.Decimal(12, 2)
+  totalAmount  Decimal     @map("total_amount") @db.Decimal(12, 2)
+  currency     String      @default("USD")
+  notes        String?
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  business     Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  agentRun     AgentRun       @relation(fields: [agentRunId], references: [id])
+  items        PurchaseItem[]
+  approvalLogs ApprovalLog[]
+  payment      Payment?
+
+  @@index([businessId])
+  @@map("purchase_orders")
+}
+
+/// A line item within a purchase order.
+model PurchaseItem {
+  id              String   @id @default(uuid())
+  purchaseOrderId String   @map("purchase_order_id")
+  productId       String   @map("product_id")
+  supplierName    String   @map("supplier_name")
+  quantity        Int
+  unitPrice       Decimal  @map("unit_price") @db.Decimal(12, 2)
+  totalPrice      Decimal  @map("total_price") @db.Decimal(12, 2)
+  reason          String?                                          // Why this item was recommended
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  // Relations
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product       Product       @relation(fields: [productId], references: [id])
+
+  @@index([purchaseOrderId])
+  @@map("purchase_items")
+}
+
+/// Audit log for purchase order approvals/rejections.
+model ApprovalLog {
+  id              String         @id @default(uuid())
+  purchaseOrderId String         @map("purchase_order_id")
+  userId          String         @map("user_id")
+  action          ApprovalAction
+  comment         String?
+  createdAt       DateTime       @default(now()) @map("created_at")
+
+  // Relations
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  user          User          @relation(fields: [userId], references: [id])
+
+  @@index([purchaseOrderId])
+  @@map("approval_logs")
+}
+
+/// A payment record linked to a purchase order.
+model Payment {
+  id              String        @id @default(uuid())
+  purchaseOrderId String        @unique @map("purchase_order_id")
+  paypalOrderId   String?       @unique @map("paypal_order_id")
+  status          PaymentStatus @default(PENDING)
+  amount          Decimal       @db.Decimal(12, 2)
+  currency        String        @default("USD")
+  paypalResponse  Json?         @map("paypal_response")      // Raw PayPal API response
+  capturedAt      DateTime?     @map("captured_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+
+  @@map("payments")
+}
